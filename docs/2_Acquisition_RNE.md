@@ -20,10 +20,10 @@ Toutes les données sont déposées dans MinIO (`rne/stock/`, `rne/flux/`, `rne/
 **Sortie** : MinIO `rne/stock/`
 
 ### Vue d’ensemble
-1. Préparation du dossier temporaire  
-2. Téléchargement et extraction du stock  
-3. Upload vers MinIO (`rne/stock/`)  
-4. Nettoyage
+1. Préparation / nettoyage du dossier temporaire
+2. Téléchargement et extraction du stock
+3. Upload vers MinIO (`rne/stock/`)
+4. Pas de nettoyage final (le DAG s’arrête après l’upload)
 
 > Le stock n’est pas téléchargé automatiquement : il est lancé manuellement lors des nouvelles publications INPI.
 
@@ -56,6 +56,7 @@ Toutes les données sont déposées dans MinIO (`rne/stock/`, `rne/flux/`, `rne/
 **Sources** :
 - stock RNE (MinIO `rne/stock/`)
 - flux RNE (MinIO `rne/flux/`)
+- dernière date traitée via `latest_rne_date.json` (MinIO `rne/database/`)
 
 **Sorties** :
 - base consolidée : `rne_<date>.db.gz` (MinIO `rne/database/`)  
@@ -63,13 +64,18 @@ Toutes les données sont déposées dans MinIO (`rne/stock/`, `rne/flux/`, `rne/
 
 ### Vue d’ensemble
 1. Préparation du dossier temporaire  
-2. Téléchargement du stock et des flux depuis MinIO  
-3. Agrégation des JSON → création de la base SQLite  
-4. Déduplication interne  
-5. Validation de volumétrie  
-6. Upload vers MinIO (`rne/database/`) avec nommage par date  
-7. Génération / mise à jour de `latest_rne_date.json`  
-8. Nettoyage
+2. Récupération de la date la plus récente (`latest_rne_date.json`) et
+   téléchargement de la base précédente si besoin
+3. Téléchargement du stock et des flux depuis MinIO (le stock est ignoré si une
+   date existe déjà)
+4. Agrégation des JSON → création de la base SQLite
+5. Déduplication interne
+6. Validation de volumétrie
+7. Upload vers MinIO (`rne/database/`) avec nommage selon la dernière date de
+   flux traitée
+8. Génération / mise à jour de `latest_rne_date.json` (date = dernier flux + 1
+   jour)
+9. Nettoyage
 
 > Le dernier flux disponible (jour même) peut être ignoré pour éviter un flux incomplet.
 
@@ -80,7 +86,7 @@ Toutes les données sont déposées dans MinIO (`rne/stock/`, `rne/flux/`, `rne/
 1. `get_rne_stock` (manuel) → fournit le stock complet  
 2. `get_flux_rne` (quotidien) → fournit les flux journaliers  
 3. `fill_rne_database` (quotidien) :
-   - lit stock + flux  
+   - lit stock + flux (saute le stock après la première exécution si une date existe déjà)
    - génère la base consolidée dans `rne/database/`  
    - fournit `latest_rne_date.json`
 
