@@ -83,21 +83,18 @@ Toutes les données sont déposées dans MinIO (`rne/stock/`, `rne/flux/`, `rne/
 
 ## 5. Chronologie et dépendances
 
-1. Acquisition SIRENE (stock + flux)  
-2. Récupération de la base RNE consolidée depuis MinIO (pas d’ingestion de stock/flux dans ce DAG)  
-3. **ETL SIRENE** :
-   - sélectionne le mois SIRENE courant ou précédent disponible,
-   - lit SIRENE stock + flux et la base RNE consolidée,
-   - enrichit avec les datasets secondaires,
-   - construit la base SQLite `sirene_<date>.db.gz` dans `sirene/database/`,
-   - génère `data_source_updates.json` pour tracer les mises à jour,
-4. Déclenchement du DAG Elasticsearch  
-5. La base publiée est ensuite utilisée par Data.gouv et d’autres consommateurs
+1. get_rne_stock (manuel) → fournit le stock RNE
+2. get_flux_rne (quotidien) → fournit les flux journaliers
+3. fill_rne_database (quotidien) :
+   - lit stock + flux (saute le stock après la première exécution si une date existe déjà)
+   - génère la base consolidée dans rne/database/
+   - met à jour latest_rne_date.json
 
-> **Important :** après la première exécution, `fill_rne_database` réutilise la date enregistrée dans `latest_rne_date.json`.  
-> Il **ignore complètement le stock** et ne traite **que les flux depuis cette date**.
+Important : après la première exécution, fill_rne_database réutilise la date enregistrée dans latest_rne_date.json.
+Il ignore complètement le stock et ne traite que les flux depuis cette date.
 
-Cette base RNE est ensuite consommée par l’ETL Sirene dans `3_ETL_SIRENE.md`.
+Cette base RNE est ensuite consommée par l’ETL Sirene dans 3_ETL_SIRENE.md.
+
 
 ---
 
