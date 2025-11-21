@@ -72,15 +72,15 @@ L’intégration est orchestrée par `DatabaseTableConstructor` dans un bloc dé
 ## 5. Chronologie et dépendances
 
 1. Acquisition SIRENE (stock + flux)  
-2. Acquisition RNE (stock + flux + base consolidée)  
+2. Récupération de la base RNE consolidée depuis MinIO (pas d’ingestion de stock/flux dans ce DAG)  
 3. **ETL SIRENE** :
    - sélectionne le mois SIRENE courant ou précédent disponible,
    - lit SIRENE stock + flux et la base RNE consolidée,
    - enrichit avec les datasets secondaires,
    - construit la base SQLite `sirene_<date>.db.gz` dans `sirene/database/`,
    - génère `data_source_updates.json` pour tracer les mises à jour,
-4. Déclenchement du DAG Elasticsearch (indexation à partir de la base publiée)  
-5. La base publiée est ensuite utilisée par Data.gouv et d’autres consommateurs en aval.
+4. Déclenchement du DAG Elasticsearch  
+5. La base publiée est ensuite utilisée par Data.gouv et d’autres consommateurs
 
 ---
 
