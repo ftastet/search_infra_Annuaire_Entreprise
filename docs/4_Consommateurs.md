@@ -24,7 +24,8 @@ L’objectif est d’expliquer **comment** et **quand** ils utilisent `sirene.db
 2. Décompresse l’archive et lit les tables SIRENE, RNE intégrées et enrichissements secondaires.  
 3. Construit ou met à jour les index Elasticsearch (entreprises, établissements, dirigeants, etc.).  
 4. Met à jour l’alias Elasticsearch pour pointer vers les index fraîchement reconstruits.  
-5. Effectue les actions de post-traitement suivantes :
+5. Génère puis met à jour le sitemap (tâches `create_sitemap` et `update_sitemap`).  
+6. Effectue les actions de post-traitement suivantes :
    - déclenchement d’un DAG de **snapshot** (en environnement distant) ou **flush du cache Redis** selon l’environnement,  
    - synchronisation d’un fichier de suivi/métadonnées des sources,  
    - exécution de tests API E2E,  
@@ -44,14 +45,15 @@ L’objectif est d’expliquer **comment** et **quand** ils utilisent `sirene.db
 ### Vue d’ensemble du rôle Data.gouv
 
 1. Vérifie l’environnement d’exécution via une tâche `check_if_prod` :
-   - si l’environnement n’est **pas** `prod`, le pipeline est court-circuité et ne poursuit pas l’export,
+   - si l’environnement n’est **pas** `prod`, le pipeline est court-circuité,
    - si l’environnement est `prod`, le pipeline continue.  
 2. Télécharge depuis MinIO la dernière archive `sirene_<date>.db.gz` mise à disposition par l’ETL.  
 3. Décompresse la base SQLite.  
 4. Génère plusieurs fichiers tabulaires (unités légales, établissements, administrations, etc.).  
 5. Comprime les fichiers générés.  
 6. Dépose les fichiers dans MinIO.  
-7. Publie les fichiers sur **data.gouv.fr** via l’API dédiée.
+7. Publie les fichiers sur **data.gouv.fr** via l’API dédiée.  
+8. Nettoie le dossier temporaire.
 
 > En pratique, le DAG Data.gouv ne réalise l’export complet que lorsque l’environnement est `prod`.
 
@@ -61,7 +63,7 @@ L’objectif est d’expliquer **comment** et **quand** ils utilisent `sirene.db
 
 1. L’ETL SIRENE publie `sirene_<date>.db.gz` dans MinIO.  
 2. Le DAG Elasticsearch est déclenché immédiatement après l’upload et reconstruit les index.  
-3. Le DAG Data.gouv, exécuté quotidiennement, consomme la **dernière** base publiée, **uniquement en environnement de production**.
+3. Le DAG Data.gouv, exécuté quotidiennement, consomme la **dernière** base publiée, uniquement en environnement de production.
 
 Ces pipelines aval sont donc **totalement dépendants** du succès de l’ETL et de la disponibilité de `sirene.db`.
 
