@@ -195,7 +195,7 @@ Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent
 #### Fonctions / classes clés
 - `get_start_date_minio` : lit `latest_rne_date.json` dans MinIO, en extrait `latest_date` et pousse `start_date` en XCom (ou `None` si fichier absent).
 - `create_db` / `create_tables` : Crée la base SQLite et initialise toutes les tables **uniquement lorsque `start_date` est `None` (premier run)**. Lorsque `start_date` est défini, la base n’est pas recréée : elle est récupérée par `get_latest_db`, décompressée, puis réutilisée telle quelle pour l’injection des nouveaux flux.
-- `get_latest_db` : télécharge la base précédente depuis MinIO (snapshot `rne_<date>.db.gz`), la décompresse et permet ainsi une reprise à partir d’un état consolidé.
+- `get_latest_db` : télécharge la base précédente depuis MinIO (snapshot `rne_<date>.db.gz` de la veille, i.e. `start_date – 1`), la décompresse sous `rne_<start_date>.db` et permet ainsi une reprise à partir d’un état consolidé.
 - `process_stock_json_files` : ne s’exécute que si `start_date` est `None` (premier run). Télécharge les JSON du stock depuis MinIO, les injecte via `inject_records_into_db` puis supprime les fichiers locaux.
 - `process_flux_json_files` : liste les flux `rne/flux`, exclut le flux le plus récent, filtre les fichiers à partir de `start_date` (ou de la date la plus ancienne si première exécution), décompresse puis injecte chaque fichier via `inject_records_into_db`, et pousse `last_date_processed` en XCom.
 - `inject_records_into_db` : lit un fichier JSON (stock ou flux), transforme les enregistrements RNE en objets UL (via `process_records_to_extract_rne_data` + `map_rne_company_to_ul`) et insère dans les tables SQLite.
