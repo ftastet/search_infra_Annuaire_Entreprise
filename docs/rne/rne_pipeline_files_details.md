@@ -1,110 +1,278 @@
 # rne_pipeline_files_details.md
 
 ## 1. Objectif
-Ce document fournit une vue opérationnelle de bout en bout du pipeline RNE. Il reprend la structure de la partie 5 de `2.1_RNE_Architecture.md` et détaille, pour chaque étape, les DAGs Airflow, les tâches, les fichiers exécutés (Python/bash/SQL), les fonctions ou classes clés et l’ordre réel d’appel. L’objectif est de permettre à un non‑développeur de suivre précisément ce qui s’exécute lors de l’acquisition du stock, de l’acquisition quotidienne des flux et de la construction de la base consolidée RNE.
+Ce document fournit une vision complète, technique et fonctionnelle, de l’ensemble du pipeline RNE.  
+Il détaille les DAGs Airflow, les fichiers exécutés, les fonctions, les modèles et les séquences d’appel, mais aussi la logique métier sous-jacente (pourquoi chaque étape existe, ce qu’elle produit, ce qu’elle consomme).  
+
+L’objectif est que même un non-développeur puisse comprendre :
+- ce qui se passe réellement dans le pipeline,
+- dans quel ordre,
+- quels fichiers sont impliqués,
+- et comment la base consolidée RNE est produite chaque jour.
+
+Le document reprend la partie 5 du fichier `2.1_RNE_Architecture.md` et l’étend en une vue opérationnelle détaillée.
+
+---
 
 ## 2. Vue d’ensemble du pipeline RNE
-- **DAGs Airflow impliqués** :
-  - `get_rne_stock` (acquisition du stock initial).
-  - `get_flux_rne` (acquisition quotidienne des flux via l’API RNE Diff).
-  - `fill_rne_database` (construction quotidienne de la base SQLite consolidée et mise à jour des métadonnées).
-- **Stockage commun** : MinIO est la source unique de vérité (`rne/stock/`, `rne/flux/`, `rne/database/`).
-- **Chaîne globale** : stock (ponctuel) → flux (quotidien) → consolidation (quotidienne, exclut le flux J).
 
-## 3. Détail par étape (partie 5 de 2.1, enrichie)
-### 3.1 Acquisition du stock RNE
-- **DAG impliqué** : `get_rne_stock` (fichier `workflows/data_pipelines/rne/stock/DAG.py`).
-- **Tâches Airflow (ordre)** :
-  1. `clean_previous_outputs` (bash) – purge et recrée le dossier temporaire.
-  2. `get_rne_latest_stock` – télécharge le ZIP du stock via `download_stock`.
-  3. `unzip_files_and_upload_minio` – décompresse le ZIP et envoie chaque JSON dans MinIO `rne/stock/`.
-- **Fichiers exécutés** :
-  - DAG Airflow : `workflows/data_pipelines/rne/stock/DAG.py`.
-  - Script bash de téléchargement FTP : `workflows/data_pipelines/rne/stock/get_stock.sh`.
-  - Classe processeur : `workflows/data_pipelines/rne/stock/processor.py`.
-  - Configuration source : `workflows/data_pipelines/rne/stock/config.py`.
-- **Fonctions / classes clés** :
-  - `RneStockProcessor` (hérite de `DataProcessor`) : orchestre le téléchargement et l’upload MinIO (`processor.py`).
-  - `download_stock(ftp_url)` : exécute `get_stock.sh` avec `subprocess.run` pour rapatrier `stock_rne.zip` dans le répertoire temporaire.
-  - `send_stock_to_minio()` : ouvre le ZIP, extrait chaque JSON puis envoie via `MinIOClient` (classe `File` pour le mapping des chemins) avant de supprimer les fichiers locaux.
-- **Chaîne d’appel** :
-  - DAG instancie `RneStockProcessor` → `clean_previous_outputs` prépare le dossier → `get_rne_latest_stock` appelle `download_stock` → le script `get_stock.sh` télécharge le ZIP → `unzip_files_and_upload_minio` appelle `send_stock_to_minio` qui extrait et pousse chaque fichier vers MinIO.
+### 2.1 Vue simple (pour non-développeur)
+STOCK (run manuel une seule fois)
+↓ écrit dans MinIO rne/stock/
 
-### 3.2 Acquisition quotidienne des flux RNE
-- **DAG impliqué** : `get_flux_rne` (fichier `workflows/data_pipelines/rne/flux/DAG.py`).
-- **Tâches Airflow (ordre)** :
-  1. `clean_previous_outputs` (bash) – supprime/recrée le répertoire temporaire `RNE_FLUX_TMP_FOLDER`.
-  2. `get_every_day_flux` – boucle de récupération de tous les flux manquants jusqu’à J–1 et upload MinIO.
-  3. `clean_outputs` (bash) – supprime les fichiers temporaires locaux.
-  4. `send_notification_success_mattermost` – notification Mattermost de succès (en échec, callback `send_notification_failure_mattermost`).
-- **Fichiers exécutés** :
-  - DAG Airflow : `workflows/data_pipelines/rne/flux/DAG.py`.
-  - Tâches Python : `workflows/data_pipelines/rne/flux/flux_tasks.py`.
-  - Client API : `workflows/data_pipelines/rne/flux/rne_api.py`.
-- **Fonctions / classes clés** :
-  - `get_every_day_flux(ti)` : détermine `start_date` (fichier le plus récent dans MinIO, sinon `RNE_DEFAULT_START_DATE`), fixe `end_date` à J–1, itère jour par jour et appelle `get_and_save_daily_flux_rne`.
-  - `get_and_save_daily_flux_rne(start_date, end_date, first_exec, ti)` : crée un fichier JSON local, instancie `ApiRNEClient`, itère sur les pages API, écrit chaque entreprise sur une ligne, gère les erreurs (sauvegarde partielle en `.gz` puis suppression), compresse et envoie le fichier vers MinIO `rne/flux/`, supprime les artefacts locaux.
-  - `ApiRNEClient` : gère l’authentification/token (RNE API token), construit l’URL `RNE_API_DIFF_URL`, effectue des retries avec adaptation du `pageSize` si nécessaire.
-  - Fonctions de support : `compute_start_date`, `get_last_json_file_date`, `get_last_siren` (pour redémarrer en cas de reprise), `send_notification_success_mattermost`/`send_notification_failure_mattermost` (notifications Mattermost).
-- **Chaîne d’appel** :
-  - DAG crée les tasks → `clean_previous_outputs` → `get_every_day_flux` : calcule la date de début, puis pour chaque jour appelle `get_and_save_daily_flux_rne` → `get_and_save_daily_flux_rne` instancie `ApiRNEClient.make_api_request` en boucle, écrit puis compresse le fichier, l’upload à MinIO → `clean_outputs` supprime le répertoire temporaire → notification de succès.
+FLUX (tous les jours à 01h00)
+↓ écrit dans MinIO rne/flux/
 
-### 3.3 Consolidation quotidienne de la base RNE
-- **DAG impliqué** : `fill_rne_database` (fichier `workflows/data_pipelines/rne/database/DAG.py`).
-- **Tâches Airflow (ordre)** :
-  1. `clean_previous_outputs` (bash) – nettoie et recrée le dossier `RNE_DB_TMP_FOLDER`.
-  2. `get_start_date` – télécharge `latest_rne_date.json` (si présent) depuis MinIO et pousse `start_date` en XCom.
-  3. `create_db` – crée une base SQLite vide (si premier run) et enregistre son chemin dans XCom.
-  4. `get_latest_db` – si `start_date` existe, télécharge la base précédente (`rne_<start_date-1>.db.gz`), la décompresse et affiche des comptes de tables.
-  5. `process_stock_json_files` – uniquement si `start_date` est `None` : télécharge chaque JSON du stock MinIO, appelle `inject_records_into_db` pour charger les données puis supprime les fichiers locaux.
-  6. `process_flux_json_files` – liste les flux MinIO, exclut systématiquement le flux le plus récent, filtre sur `start_date` (ou `0000-00-00` si premier run), décompresse chaque fichier, appelle `inject_records_into_db` pour l’injection, supprime les fichiers locaux, pousse `last_date_processed` en XCom.
-  7. `remove_duplicates` – passe sur toutes les tables (`unites_legale`, `siege`, `dirigeant_pp`, `dirigeant_pm`, `immatriculation`) pour supprimer les doublons puis `VACUUM`.
-  8. `check_db_count` – contrôle des volumes minimums par table (raises si sous les seuils).
-  9. `upload_db_to_minio` – compresse `rne_<start_date>.db` en `.gz`, l’upload vers MinIO `rne/database/` en le renommant `rne_<last_date_processed>.db.gz`, supprime le `.db.gz` local.
-  10. `upload_latest_date_rne_minio` – écrit `latest_rne_date.json` avec `latest_date = last_date_processed + 1`, l’upload dans MinIO `rne/database/`, supprime la copie locale, pousse la nouvelle date en XCom.
-  11. `clean_outputs` (bash) – supprime le dossier temporaire.
-  12. `send_notification_mattermost` – notifie les dates traitées.
-- **Fichiers exécutés** :
-  - DAG Airflow : `workflows/data_pipelines/rne/database/DAG.py`.
-  - Fonctions de tâches : `workflows/data_pipelines/rne/database/task_functions.py`.
-  - Connexion SQLite : `workflows/data_pipelines/rne/database/db_connexion.py`.
-  - Parsing/mapping/injection : `workflows/data_pipelines/rne/database/process_rne.py`, `map_rne.py`, modèles `rne_model.py` (structure source) et `ul_model.py` (structure cible SQLite).
-- **Fonctions / classes clés** :
-  - `get_start_date_minio` : lit `latest_rne_date.json` depuis MinIO (`RNE_MINIO_DATA_PATH`), pousse `start_date` (ou `None` si absent).
-  - `create_db_path`/`create_db` : détermine le chemin `rne_<start_date>.db`, crée la base et les tables via `create_tables` si pas de `start_date` (premier run).
-  - `get_latest_db` : récupère la base précédente (`rne_<start_date-1>.db.gz`), décompresse et compte les tables via `get_tables_count`.
-  - `process_stock_json_files` : boucle sur les JSON du stock MinIO (non compressés), injecte dans la base par `inject_records_into_db(file_path, db_path, file_type="stock")` puis supprime les fichiers.
-  - `process_flux_json_files` : liste MinIO `rne/flux`, exclut le dernier flux, filtre sur la date, décompresse, appelle `inject_records_into_db(..., file_type="flux")`, supprime les fichiers, pousse `last_date_processed`.
-  - `inject_records_into_db` (dans `process_rne.py`) : lit les fichiers (stock complet ou flux ligne à ligne), transforme via `process_records_to_extract_rne_data` qui mappe chaque enregistrement RNE (`RNECompany`) vers `UniteLegale` au moyen de `map_rne_company_to_ul`, puis insère dans SQLite via `insert_unites_legales_into_db`.
-  - `map_rne_company_to_ul` (dans `map_rne.py`) : convertit la structure RNE (Pydantic `RNECompany` et objets associés) en objets `UniteLegale`, `Siege`, `Etablissement`, `Activite`, `DirigeantsPP/PM`, `Immatriculation` définis dans `ul_model.py`.
-  - `remove_duplicates_from_tables` : supprime les doublons par table, appelé par `remove_duplicates`.
-  - `upload_db_to_minio` / `upload_latest_date_rne_minio` : gèrent la compression, l’upload du `.db.gz` et la mise à jour des métadonnées `latest_rne_date.json`.
-- **Chaîne d’appel** :
-  - DAG crée les tasks → `clean_previous_outputs` → `get_start_date_minio` (XCom `start_date`) → `create_db` (XCom `rne_db_path`, éventuellement création de tables) → `get_latest_db` (récupération base précédente si `start_date` défini) → `process_stock_json_files` (si première exécution) → `process_flux_json_files` (tous les runs, sauf dernier flux) → `remove_duplicates` → `check_db_count` → `upload_db_to_minio` → `upload_latest_date_rne_minio` → `clean_outputs` → `notification_mattermost`.
+BASE CONSOLIDÉE RNE (tous les jours à 02h00)
+↓ lit rne/stock + rne/flux (sauf flux J)
 
-### 3.4 Mise à disposition
-- **DAG impliqué** : `fill_rne_database` (même que l’étape 3.3).
-- **Actions finales** :
-  - Upload du fichier `rne_<last_date_processed>.db.gz` dans `rne/database/`.
-  - Upload/écrasement de `latest_rne_date.json` dans `rne/database/` avec `latest_date = last_date_processed + 1`.
-  - Notification Mattermost des dates couvertes.
-- **Chaîne d’appel** : tâches `upload_db_to_minio` → `upload_latest_date_rne_minio` → `clean_outputs` → `send_notification_mattermost` dans le DAG `fill_rne_database`.
 
-## 4. Séquence d’exécution de bout en bout
-1. **Acquisition du stock initial** (DAG manuel `get_rne_stock`, ponctuel)
-   - `clean_previous_outputs` → `get_rne_latest_stock` (exécute `download_stock` → `get_stock.sh`) → `unzip_files_and_upload_minio` (`send_stock_to_minio`).
-2. **Acquisition quotidienne des flux** (DAG `get_flux_rne`, 01h)
-   - `clean_previous_outputs` → `get_every_day_flux` (`compute_start_date` → boucle jour par jour → `get_and_save_daily_flux_rne` → `ApiRNEClient.make_api_request` → upload MinIO) → `clean_outputs` → `send_notification_success_mattermost` (échec : callback `send_notification_failure_mattermost`).
-3. **Construction quotidienne de la base consolidée** (DAG `fill_rne_database`, 02h)
-   - `clean_previous_outputs` → `get_start_date` (lit `latest_rne_date.json` si présent) → `create_db` (crée tables si premier run) → `get_latest_db` (récupère base précédente si reprise) → `process_stock_json_files` (premier run) → `process_flux_json_files` (tous les runs, exclut flux J) → `remove_duplicates` → `check_db_count` → `upload_db_to_minio` (compresse, renomme selon `last_date_processed`) → `upload_latest_date_rne_minio` (met à jour métadonnées) → `clean_outputs` → `send_notification_mattermost`.
-- **Fonctions réutilisées entre DAGs** :
-  - Helpers MinIO (`MinIOClient`, `File`) sont utilisés par le processeur de stock, le collecteur de flux et la consolidation (téléchargement/chargement des fichiers).
-  - Notifications Mattermost (`Notification.send_notification_mattermost`, `send_message`) sont utilisées dans les DAGs stock, flux et base.
+### 2.2 Vue technique
+DAGs Airflow impliqués :
+- **get_rne_stock**  
+  Rapatrie le ZIP du stock et dépose les JSON en `rne/stock/`.
 
-## 5. Points d’attention
-- **Dépendance MinIO** : tous les DAGs lisent/écrivent dans MinIO ; les échecs réseau ou d’authentification bloquent la chaîne (stock → flux → base).
-- **Gestion des dates** : `get_flux_rne` détermine `start_date` à partir du dernier flux en MinIO ou `RNE_DEFAULT_START_DATE`; `fill_rne_database` se base uniquement sur `latest_rne_date.json` (pas de fallback) pour décider de recharger le stock et quels flux appliquer.
-- **Exclusion du flux le plus récent** : `process_flux_json_files` ignore systématiquement le dernier fichier flux pour éviter un flux incomplet ; la base couvre donc jusqu’à J–1.
-- **Volume et cohérence** : `check_db_count` impose des seuils minimaux sur les tables SQLite ; en dessous, le DAG échoue (probable problème de données ou de chargement).
-- **Nettoyage** : chaque DAG supprime ses dossiers temporaires en fin d’exécution ; en cas d’échec avant nettoyage, des fichiers peuvent rester mais sont purgés au run suivant (`clean_previous_outputs`).
-- **API RNE** : `ApiRNEClient` implémente des retries et peut ajuster `pageSize` en cas d’erreur 500/mémoire ; une absence de token ou des erreurs 401/403/429 forcent la régénération du token.
+- **get_flux_rne**  
+  Télécharge les flux RNE Diff depuis l’API INPI, un fichier `.json.gz` par jour, stockés en `rne/flux/`.
+
+- **fill_rne_database**  
+  Construit une base SQLite consolidée contenant tout l’historique : stock + flux jusqu’à J–1.
+
+Stockage centralisé :
+- MinIO est la source unique de vérité :
+  - `rne/stock/`
+  - `rne/flux/`
+  - `rne/database/`
+
+Rythme :
+- Stock : ponctuel.
+- Flux : quotidien.
+- Consolidation : quotidienne (exclut J par sécurité).
+
+---
+
+## 3. Glossaire (important pour non-dev)
+
+**DAG** : un workflow Airflow composé de tâches ordonnées.  
+**Task** : une étape individuelle d’un DAG.  
+**MinIO** : stockage objet compatible S3.  
+**Stock RNE** : photographie complète du registre INPI à un instant T.  
+**Flux RNE** : mises à jour quotidiennes du registre.  
+**Snapshot SQLite** : base générée chaque jour pour exploitation interne.  
+**XCom** : mécanisme Airflow pour transmettre des données entre tâches.  
+**Flux J** : flux du jour en cours, ignoré par sécurité (souvent incomplet).  
+**first run** : première exécution historique (inclut le stock).  
+
+---
+
+## 4. Logique fonctionnelle du pipeline (la raison de chaque étape)
+
+### 4.1 Pourquoi un stock ?
+Il donne un **état initial complet** du registre RNE.  
+Sans ce point de départ, impossible de reconstruire un historique fiable.
+
+### 4.2 Pourquoi des flux ?
+Ils amènent **tous les changements quotidiens** :
+- créations,
+- radiations,
+- modifications,
+- dirigeants,
+- adresses,
+- activités.
+
+### 4.3 Pourquoi une base consolidée ?
+Les JSON RNE sont bruts, volumineux et difficiles à manipuler.  
+La consolidation produit :
+- une structure tabulaire exploitable,
+- une vue unifiée,
+- un référentiel interne fiable,
+- une base versionnée par jour.
+
+### 4.4 Pourquoi ignorer le flux J ?
+Le flux du jour peut être :
+- incomplet,
+- en cours de constitution,
+- corrompu lors d’une récupération partielle.
+
+Pour garantir la fiabilité :
+→ le pipeline intègre les flux **jusqu’à J–1**.
+
+### 4.5 Pourquoi des répertoires temporaires ?
+Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent les runs suivants.
+
+---
+
+## 5. Détail complet par étape (partie 5 enrichie)
+
+### 5.1 Acquisition du stock RNE
+- **DAG :** `get_rne_stock`  
+  (`workflows/data_pipelines/rne/stock/DAG.py`)
+
+#### Ordre des tâches
+1) `clean_previous_outputs`  
+2) `get_rne_latest_stock`  
+3) `unzip_files_and_upload_minio`
+
+#### Fichiers utilisés
+- `DAG.py`  
+- `processor.py`  
+- `config.py`  
+- `get_stock.sh`
+
+#### Fonctions clés
+- `download_stock` → appelle `get_stock.sh`
+- `send_stock_to_minio`
+- `RneStockProcessor`
+
+#### Fonctionnellement
+- Télécharge le ZIP officiel INPI.
+- Extrait tous les JSON.
+- Envoie chaque entreprise dans `rne/stock/`.
+- Cette étape n’est refaite qu’en cas de réinitialisation.
+
+---
+
+### 5.2 Acquisition quotidienne des flux RNE
+- **DAG :** `get_flux_rne`  
+  (`workflows/data_pipelines/rne/flux/DAG.py`)
+
+#### Ordre des tâches
+1) `clean_previous_outputs`  
+2) `get_every_day_flux`  
+3) `clean_outputs`  
+4) `send_notification_success_mattermost`
+
+#### Fichiers utilisés
+- `flux_tasks.py`
+- `rne_api.py`
+
+#### Fonctions clés
+- `compute_start_date`
+- `get_and_save_daily_flux_rne`
+- `ApiRNEClient.make_api_request`
+- `get_last_siren` (pour reprise)
+- `send_notification*_mattermost`
+
+#### Fonctionnellement
+- Détermine automatiquement la dernière journée récupérée.
+- Télécharge les flux jusqu’à J–1.
+- Gère pagination, erreurs API, sauvegardes partielles.
+- Compresse et envoie chaque journée dans MinIO.
+
+---
+
+### 5.3 Construction quotidienne de la base consolidée
+- **DAG :** `fill_rne_database`  
+  (`workflows/data_pipelines/rne/database/DAG.py`)
+
+#### Ordre complet des tâches
+1) `clean_previous_outputs`  
+2) `get_start_date`  
+3) `create_db`  
+4) `get_latest_db`  
+5) `process_stock_json_files` (si start_date = None)  
+6) `process_flux_json_files`  
+7) `remove_duplicates`  
+8) `check_db_count`  
+9) `upload_db_to_minio`  
+10) `upload_latest_date_rne_minio`  
+11) `clean_outputs`  
+12) `send_notification_mattermost`
+
+#### Fichiers utilisés
+- `task_functions.py`
+- `db_connexion.py`
+- `process_rne.py`
+- `map_rne.py`
+- `rne_model.py`
+- `ul_model.py`
+
+#### Fonctions clés
+- `create_tables`
+- `inject_records_into_db`
+- `process_records_to_extract_rne_data`
+- `map_rne_company_to_ul`
+- `remove_duplicates_from_tables`
+- `upload_db_to_minio`
+
+#### Fonctionnellement
+- Récupère la base précédente (si existante).
+- Recharge le stock uniquement la toute première fois.
+- Charge tous les flux utiles (sauf flux J).
+- Transforme tous les JSON → tables UL.
+- Déduplique.
+- Valide la cohérence.
+- Versionne la base + met à jour latest_rne_date.json.
+
+---
+
+## 6. Séquence d’exécution de bout en bout
+
+[Stock - manuel]
+↓ download_stock
+↓ unzip JSON
+↓ upload MinIO rne/stock/
+
+[Flux - chaque jour à 01:00]
+↓ clean_previous_outputs
+↓ compute_start_date (MinIO)
+↓ get_and_save_daily_flux_rne (API RNE → JSON.gz)
+↓ upload MinIO rne/flux/
+↓ clean_outputs
+↓ notification
+
+[Base consolidée - chaque jour à 02:00]
+↓ clean_previous_outputs
+↓ lire latest_rne_date.json (MinIO)
+↓ récupérer base précédente si reprise
+↓ charger stock (si première fois)
+↓ charger flux (sauf flux J)
+↓ mapping complet RNE → UL
+↓ injection SQLite
+---
+
+## 7. Points d’attention
+
+### 7.1 Dépendance forte à MinIO
+Tous les DAGs lisent et écrivent dans MinIO.  
+▶ Panne MinIO = pipeline bloqué.
+
+### 7.2 Date logic double (important)
+- **Flux** : start_date déterminée depuis les fichiers MinIO.  
+- **Base** : start_date déterminée via `latest_rne_date.json`.  
+Les deux systèmes doivent rester cohérents.
+
+### 7.3 Flux J exclu
+Pour éviter un snapshot basé sur des données incomplètes.
+
+### 7.4 Volume croissant
+La base SQLite grossit chaque jour → attention au coût des opérations (VACUUM, upload).
+
+### 7.5 Risques d’incohérence si un DAG échoue
+Si `get_flux_rne` échoue :
+- La base ne sera pas avancée le lendemain.
+
+Si `fill_rne_database` échoue :
+- `latest_rne_date.json` ne bouge pas → reprise au même point au prochain run.
+
+---
+
+## 8. TL;DR (résumé ultra-court)
+
+- Le **stock** initialise le registre.  
+- Les **flux** amènent les changements quotidiens.  
+- La **consolidation** produit une base SQLite complète et exploitable.  
+- Tout transite via **MinIO**.  
+- La base quotidienne est versionnée et consommable immédiatement.  
+- Le pipeline est **séquentiel et strictement ordonné** :
+  stock → flux → consolidation.
+
+
+↓ déduplication
+↓ validation
+↓ compression + upload rne_<date>.db.gz
+↓ maj latest_rne_date.json
+↓ notification finale
+↓ génère rne_<date>.db.gz
+↓ met à jour latest_rne_date.json
+
