@@ -42,7 +42,7 @@ Ce document fournit une vue opérationnelle de bout en bout du pipeline RNE. Il 
   - Tâches Python : `workflows/data_pipelines/rne/flux/flux_tasks.py`.
   - Client API : `workflows/data_pipelines/rne/flux/rne_api.py`.
 - **Fonctions / classes clés** :
-  - `get_every_day_flux(ti)` : détermine `start_date` (fichier le plus récent dans MinIO, sinon `RNE_DEFAULT_START_DATE`), fixe `end_date` à J–1, itère jour par jour et appelle `get_and_save_daily_flux_rne`.
+  - `get_every_day_flux(ti)` : `ti` est l’objet `TaskInstance` fourni par Airflow pour lire/écrire des XCom ; la fonction détermine `start_date` (fichier le plus récent dans MinIO, sinon `RNE_DEFAULT_START_DATE`), fixe `end_date` à J–1, itère jour par jour et appelle `get_and_save_daily_flux_rne`.
   - `get_and_save_daily_flux_rne(start_date, end_date, first_exec, ti)` : crée un fichier JSON local, instancie `ApiRNEClient`, itère sur les pages API, écrit chaque entreprise sur une ligne, gère les erreurs (sauvegarde partielle en `.gz` puis suppression), compresse et envoie le fichier vers MinIO `rne/flux/`, supprime les artefacts locaux.
   - `ApiRNEClient` : gère l’authentification/token (RNE API token), construit l’URL `RNE_API_DIFF_URL`, effectue des retries avec adaptation du `pageSize` si nécessaire.
   - Fonctions de support : `compute_start_date`, `get_last_json_file_date`, `get_last_siren` (pour redémarrer en cas de reprise), `send_notification_success_mattermost`/`send_notification_failure_mattermost` (notifications Mattermost).
