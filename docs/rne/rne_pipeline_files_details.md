@@ -149,7 +149,7 @@ Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent
 - `workflows/data_pipelines/rne/flux/rne_api.py`
 
 #### Fonctions / classes clés
-- `compute_start_date` : inspecte les fichiers déjà présents dans MinIO pour déterminer la première date à traiter.
+- `compute_start_date` : Inspecte les fichiers flux déjà présents dans MinIO et renvoie **la dernière date trouvée**, pas le jour suivant. La boucle `get_every_day_flux` redémarre donc **sur cette journée déjà existante (retraitement inclus)** avant de poursuivre jusqu’à J–1.
 - `get_every_day_flux` : pilote la boucle sur les jours à traiter jusqu’à J–1.
 - `get_and_save_daily_flux_rne` : appelle l’API RNE Diff pour une journée donnée, écrit les enregistrements JSON ligne à ligne, compresse en `.json.gz`, envoie dans MinIO, gère les erreurs et la reprise.
 - `ApiRNEClient` : encapsule l’appel à l’API (token, URL de base, retries, adaptation du pageSize).
@@ -157,6 +157,7 @@ Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent
 - `send_notification_success_mattermost` / `send_notification_failure_mattermost` : journalisent les résultats dans Mattermost.
 
 #### Fonctionnellement
+- La dernière journée présente dans MinIO est systématiquement retraitée pour garantir la complétude d’un flux qui aurait pu être partiellement téléchargé lors d’un run précédent.
 - Détermine automatiquement à partir du contenu MinIO la première date de flux à récupérer.
 - Télécharge tous les flux manquants jusqu’à J–1.
 - Assure la résilience en cas d’erreurs API (reprise, réduction du pageSize, sauvegarde partielle).
@@ -193,7 +194,7 @@ Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent
 
 #### Fonctions / classes clés
 - `get_start_date_minio` : lit `latest_rne_date.json` dans MinIO, en extrait `latest_date` et pousse `start_date` en XCom (ou `None` si fichier absent).
-- `create_db` / `create_tables` : crée le fichier SQLite `rne_<start_date>.db` (ou équivalent) et initialise toutes les tables (`unite_legale`, `siege`, `etablissement`, `activite`, `immatriculation`, `dirigeant_pp`, `dirigeant_pm`).
+- `create_db` / `create_tables` : Crée la base SQLite et initialise toutes les tables **uniquement lorsque `start_date` est `None` (premier run)**. Lorsque `start_date` est défini, la base n’est pas recréée : elle est récupérée par `get_latest_db`, décompressée, puis réutilisée telle quelle pour l’injection des nouveaux flux.
 - `get_latest_db` : télécharge la base précédente depuis MinIO (snapshot `rne_<date>.db.gz`), la décompresse et permet ainsi une reprise à partir d’un état consolidé.
 - `process_stock_json_files` : ne s’exécute que si `start_date` est `None` (premier run). Télécharge les JSON du stock depuis MinIO, les injecte via `inject_records_into_db` puis supprime les fichiers locaux.
 - `process_flux_json_files` : liste les flux `rne/flux`, exclut le flux le plus récent, filtre les fichiers à partir de `start_date` (ou de la date la plus ancienne si première exécution), décompresse puis injecte chaque fichier via `inject_records_into_db`, et pousse `last_date_processed` en XCom.
