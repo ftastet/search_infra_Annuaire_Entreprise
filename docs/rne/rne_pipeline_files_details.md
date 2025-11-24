@@ -183,7 +183,7 @@ Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent
 11. `clean_outputs`  
 12. `send_notification_mattermost`
 
-#### Schéma 
+#### Schéma de 6. `process_flux_json_files`
 
 ```
 process_flux_json_files               (task_functions.py)
