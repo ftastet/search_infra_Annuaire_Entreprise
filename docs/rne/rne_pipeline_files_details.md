@@ -185,6 +185,7 @@ Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent
 
 #### Schéma 
 
+```
 process_flux_json_files               (task_functions.py)
     │
     └──> inject_records_into_db       (process_rne.py)
@@ -207,6 +208,7 @@ process_flux_json_files               (task_functions.py)
                     ├──> connect_to_db                  (db_connexion.py)
                     ├──> find_and_delete_same_siren     (process_rne.py)
                     └──> INSERT INTO tables SQLite      (process_rne.py)
+```
 
 
 #### Fichiers utilisés
