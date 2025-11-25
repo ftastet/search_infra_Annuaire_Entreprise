@@ -210,6 +210,203 @@ process_flux_json_files               (task_functions.py)
                     └──> INSERT INTO tables SQLite      (process_rne.py)
 ```
 
+#### Chemin technique global
+
+```
+DAG fill_rne_database                              (rne/database/DAG.py)
+    │
+    ├── clean_previous_outputs (BashOperator – DAG.py)
+    │       → bash_command: rm -rf ${RNE_DB_TMP_FOLDER} && mkdir -p ${RNE_DB_TMP_FOLDER}
+    │
+    ├── get_start_date (PythonOperator – DAG.py)
+    │       → get_start_date_minio(**kwargs)             (rne/database/task_functions.py)
+    │               → MinIOClient().get_files(...)       (helpers/minio_helpers.py)
+    │                     - source_path: RNE_MINIO_DATA_PATH
+    │                     - source_name: RNE_LATEST_DATE_FILE (latest_rne_date.json)
+    │                     - dest_path:   RNE_DB_TMP_FOLDER
+    │               → ouvre RNE_DB_TMP_FOLDER/latest_rne_date.json
+    │               → lit data["latest_date"]
+    │               → parse en datetime, reformat YYYY-MM-DD
+    │               → ti.xcom_push("start_date", value=start_date)
+    │               → en cas de S3Error code "NoSuchKey" :
+    │                     ti.xcom_push("start_date", value=None)
+    │
+    ├── create_db (PythonOperator – DAG.py)
+    │       → create_db(**kwargs)                        (rne/database/task_functions.py)
+    │               → start_date = ti.xcom_pull("start_date", task_ids="get_start_date")
+    │               → rne_db_path = create_db_path(start_date)   (task_functions.py)
+    │                     - construit: RNE_DB_TMP_FOLDER + f"rne_{start_date}.db"
+    │               → ti.xcom_push("rne_db_path", rne_db_path)
+    │               → si start_date est non nul:
+    │                     return (on ne recrée pas la DB)
+    │               → si fichier rne_db_path existe: os.remove(...)
+    │               → connect_to_db(rne_db_path)         (rne/database/db_connexion.py)
+    │               → create_tables(cursor)              (rne/database/process_rne.py)
+    │               → connection.commit() / close()
+    │
+    ├── get_latest_db (PythonOperator – DAG.py)
+    │       → get_latest_db(**kwargs)                    (rne/database/task_functions.py)
+    │               → start_date = ti.xcom_pull("start_date", "get_start_date")
+    │               → si start_date est non nul:
+    │                     previous_start_date = (start_date - 1 jour)
+    │                     MinIOClient().get_files(...)   (helpers/minio_helpers.py)
+    │                         - source_name: rne_{previous_start_date}.db.gz
+    │                         - dest_name:   rne_{start_date}.db.gz
+    │                         - paths: RNE_MINIO_DATA_PATH → RNE_DB_TMP_FOLDER
+    │                     db_path = RNE_DB_TMP_FOLDER + f"rne_{start_date}.db"
+    │                     gzip.open(db_path + ".gz") → open(db_path) (shutil.copyfileobj)
+    │                     os.remove(db_path + ".gz")
+    │               → get_tables_count(RNE_DB_TMP_FOLDER + f"rne_{start_date}.db")
+    │                     (rne/database/process_rne.py)
+    │               → logging des counts (UL, siège, dirigeants, immat)
+    │
+    ├── process_stock_json_files (PythonOperator – DAG.py)
+    │       → process_stock_json_files(**kwargs)         (rne/database/task_functions.py)
+    │               → start_date = ti.xcom_pull("start_date", "get_start_date")
+    │               → rne_db_path = ti.xcom_pull("rne_db_path", "create_db")
+    │               → minio_client = MinIOClient()
+    │               → si start_date est non nul:
+    │                     return  (stock traité uniquement si pas encore de date)
+    │               → json_stock_rne_files = minio_client.get_files_from_prefix(
+    │                     prefix=RNE_MINIO_STOCK_DATA_PATH
+    │                 )
+    │               → si liste vide: raise Exception("No RNE stock files found!!!")
+    │               → pour chaque file_path dans json_stock_rne_files:
+    │                     minio_client.get_files(
+    │                         list_files=[{
+    │                             "source_path": "",
+    │                             "source_name": file_path,
+    │                             "dest_path": "",
+    │                             "dest_name": file_path,
+    │                         }]
+    │                     )
+    │                     → inject_records_into_db(file_path, rne_db_path, "stock")
+    │                           (rne/database/process_rne.py)
+    │                     → os.remove(file_path)
+    │
+    ├── process_flux_json_files (PythonOperator – DAG.py)
+    │       → process_flux_json_files(**kwargs)          (rne/database/task_functions.py)
+    │               → start_date  = ti.xcom_pull("start_date", "get_start_date")
+    │               → rne_db_path = ti.xcom_pull("rne_db_path", "create_db")
+    │               → minio_client = MinIOClient()
+    │               → json_daily_flux_files = minio_client.get_files_from_prefix(
+    │                     prefix=RNE_MINIO_FLUX_DATA_PATH
+    │                 )
+    │               → si liste vide: return
+    │               → si start_date est None: start_date = "0000-00-00"
+    │               → filtre des fichiers flux par date ≥ start_date
+    │               → pour chaque file_date retenue:
+    │                     minio_client.get_files(
+    │                         list_files=[{
+    │                             "source_path": RNE_MINIO_FLUX_DATA_PATH,
+    │                             "source_name": f"rne_flux_{file_date}.json.gz",
+    │                             "dest_path": RNE_DB_TMP_FOLDER,
+    │                             "dest_name": f"rne_flux_{file_date}.json.gz",
+    │                         }]
+    │                     )
+    │                     json_path = RNE_DB_TMP_FOLDER + f"rne_flux_{file_date}.json"
+    │                     → gzip.open(json_path + ".gz") → open(json_path)
+    │                     → os.remove(json_path + ".gz")
+    │                     → inject_records_into_db(json_path, rne_db_path, "flux")
+    │                           (rne/database/process_rne.py)
+    │                     → os.remove(json_path)
+    │               → dates = tri des dates "rne_flux_YYYY-MM-DD" dans json_daily_flux_files
+    │               → last_date_processed = dernière date ou None
+    │               → ti.xcom_push("last_date_processed", last_date_processed)
+    │
+    │       [Détail interne inject_records_into_db / flux]        (rne/database/process_rne.py)
+    │               → pour chaque ligne JSON:
+    │                     data = json.loads(line)
+    │                     unites_legales_temp = process_records_to_extract_rne_data(
+    │                           data, "flux")
+    │                     unites_legales += unites_legales_temp
+    │                     si len(unites_legales) >= 100000:
+    │                           insert_unites_legales_into_db(unites_legales, file_path, db_path)
+    │                           unites_legales = []
+    │               → flush final via insert_unites_legales_into_db(...)
+    │
+    │       [Détail interne mapping / Pydantic]                   (rne/database/process_rne.py)
+    │               process_records_to_extract_rne_data(data,"flux")
+    │                     → extract_rne_data(entity, "flux")
+    │                           → company = entity["company"]
+    │                           → rne_company = RNECompany.model_validate(company)
+    │                                 (rne/database/rne_model.py – Pydantic)
+    │                           → unite_legale = UniteLegale()        (rne/database/ul_model.py)
+    │                           → unite_legale = map_rne_company_to_ul(
+    │                                 rne_company, unite_legale)      (rne/database/map_rne.py)
+    │                           → retourne UniteLegale rempli
+    │               insert_unites_legales_into_db(...)
+    │                     → connect_to_db(db_path)                   (db_connexion.py)
+    │                     → find_and_delete_same_siren(...)          (process_rne.py)
+    │                     → INSERT INTO: unite_legale, siege, dirigeant_pp,
+    │                                       dirigeant_pm, immatriculation,
+    │                                       etablissement, activite
+    │                     → commit / close
+    │
+    ├── remove_duplicates (PythonOperator – DAG.py)
+    │       → remove_duplicates(**kwargs)                  (rne/database/task_functions.py)
+    │               → rne_db_path = ti.xcom_pull("rne_db_path", "create_db")
+    │               → connection, cursor = connect_to_db(rne_db_path)
+    │               → tables = ["unites_legale","siege","dirigeant_pp",
+    │                            "dirigeant_pm","immatriculation"]
+    │               → pour chaque table:
+    │                     remove_duplicates_from_tables(cursor, table)
+    │                           (rne/database/process_rne.py)
+    │                             - crée table temporaire
+    │                             - INSERT DISTINCT
+    │                             - DROP ancienne table
+    │                             - RENAME temp → table
+    │               → VACUUM
+    │               → commit, close (rollback + close en cas d’exception)
+    │
+    ├── check_db_count (PythonOperator – DAG.py)
+    │       → check_db_count(ti, min_*_table_count=...)    (rne/database/task_functions.py)
+    │               → rne_db_path = ti.xcom_pull("rne_db_path", "create_db")
+    │               → count_ul, count_siege, count_pp, count_pm, count_immat = \
+    │                     get_tables_count(rne_db_path)    (rne/database/process_rne.py)
+    │               → logging des counts
+    │               → si un count < min correspondant:
+    │                     raise Exception("Minimum threshold not met...")
+    │
+    ├── upload_db_to_minio (PythonOperator – DAG.py)
+    │       → upload_db_to_minio(**kwargs)                 (rne/database/task_functions.py)
+    │               → start_date         = ti.xcom_pull("start_date", "get_start_date")
+    │               → last_date_processed= ti.xcom_pull("last_date_processed", "process_flux_json_files")
+    │               → database_file_path     = RNE_DB_TMP_FOLDER + f"rne_{start_date}.db"
+    │               → database_zip_file_path = RNE_DB_TMP_FOLDER + f"rne_{start_date}.db.gz"
+    │               → gzip de rne_{start_date}.db → rne_{start_date}.db.gz
+    │               → os.remove(database_file_path)
+    │               → send_to_minio([...])                  (task_functions.py)
+    │                     → MinIOClient().send_files(...)   (helpers/minio_helpers.py)
+    │                           - source_name: rne_{start_date}.db.gz
+    │                           - dest_name:   rne_{last_date_processed}.db.gz
+    │               → os.remove(database_zip_file_path) (si présent)
+    │
+    ├── upload_latest_date_rne_minio (PythonOperator – DAG.py)
+    │       → upload_latest_date_rne_minio(ti)             (rne/database/task_functions.py)
+    │               → last_date_processed = ti.xcom_pull("last_date_processed",
+    │                                                    "process_flux_json_files")
+    │               → last_date_processed = datetime.strptime(..., "%Y-%m-%d")
+    │               → latest_date = (last_date_processed + 1 jour).strftime("%Y-%m-%d")
+    │               → écrit RNE_DB_TMP_FOLDER + "latest_rne_date.json"
+    │                     {"latest_date": latest_date}
+    │               → send_to_minio([...])                  (task_functions.py)
+    │                     - source_path: RNE_DB_TMP_FOLDER
+    │                     - source_name: RNE_LATEST_DATE_FILE
+    │                     - dest_path:   RNE_MINIO_DATA_PATH
+    │                     - dest_name:   RNE_LATEST_DATE_FILE
+    │
+    ├── clean_outputs (BashOperator – DAG.py)
+    │       → bash_command: rm -rf ${RNE_DB_TMP_FOLDER}
+    │
+    └── send_notification_mattermost (PythonOperator – DAG.py)
+            → notification_mattermost(ti)                 (rne/database/task_functions.py)
+                    → start_date = ti.xcom_pull("start_date", "get_start_date")
+                    → last_date_processed = ti.xcom_pull("last_date_processed",
+                    │                                     "process_flux_json_files")
+                    → send_message("🟢 Données RNE traitées de {start_date} à {last_date_processed}.")
+                          (helpers/mattermost.py)
+```
 
 #### Fichiers utilisés
 - `workflows/data_pipelines/rne/database/DAG.py`
