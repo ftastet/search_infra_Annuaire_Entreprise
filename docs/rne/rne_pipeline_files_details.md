@@ -183,33 +183,6 @@ Pour éviter que des fichiers partiellement écrits ou corrompus n’influencent
 11. `clean_outputs`  
 12. `send_notification_mattermost`
 
-#### Schéma de 6. `process_flux_json_files`
-
-```
-process_flux_json_files               (task_functions.py)
-    │
-    └──> inject_records_into_db       (process_rne.py)
-            │
-            └──> process_records_to_extract_rne_data    (process_rne.py)
-                    │
-                    └──> extract_rne_data               (process_rne.py)
-                            │
-                            ├──> RNECompany.model_validate   (rne_model.py)
-                            │       → parse & valider la structure JSON "company"
-                            │
-                            ├──> UniteLegale()               (ul_model.py)
-                            │       → crée un conteneur UL vide
-                            │
-                            └──> map_rne_company_to_ul       (map_rne.py)
-                                    → remplit UniteLegale à partir de RNECompany
-            │
-            └──> insert_unites_legales_into_db          (process_rne.py)
-                    │
-                    ├──> connect_to_db                  (db_connexion.py)
-                    ├──> find_and_delete_same_siren     (process_rne.py)
-                    └──> INSERT INTO tables SQLite      (process_rne.py)
-```
-
 #### Chemin technique global
 
 ```
